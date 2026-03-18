@@ -1,0 +1,208 @@
+Libraries needed for data analysis:
+
+```{r}
+library("tidyverse")
+library("ggplot2")
+library("ggforce")
+library("mlr3verse")
+library("GGally")
+```
+
+The Chosen data set was the Bank personal loan upsell data set. With the aim to predict whether a customer can be "upsold" to a personal banking loan.
+
+First skim the data to get an overview of the data:
+```{r}
+skimr::skim(bank_personal_loan3)
+```
+There is no missing data, which is good to know. All data is said to be numerical, which is technically correct. However, the data of 0,1,0 etc. is categorical, not continuous numerical.
+
+Setting the seed for reprodiucable results
+```{r}
+set.seed(212)
+```
+
+seeing what percentage of people accept the loan:
+```{r}
+tot_loans <- sum(bank_personal_loan3$Personal.Loan)
+len <- length(bank_personal_loan3$Personal.Loan)
+(tot_loans/len)*100
+```
+
+looking at the realations between the continous variables with a pairs plot:
+```{r}
+ggpairs(bank_personal_loan3 |> select(Age, Experience, Income, CCAvg, Mortgage))
+```
+There is nearly linear correlation between Age and Experiance (0.9...), so do not need both. Disclude Experiance as there are negative values, so easier to get rid of this one as less preprocessing.
+
+Now the discrete varibles
+```{r}
+bank_discrete <- bank_personal_loan3 |>
+  select(Personal.Loan, Education, Securities.Account, CD.Account, Online, CreditCard, Family) |>
+  group_by(Personal.Loan, Education,  Securities.Account, CD.Account, Online, CreditCard, Family) |>
+  summarize(value = n())
+
+ggplot(bank_discrete |> gather_set_data(x = c(1, 1:7)),
+       aes(x = x, id = id, split = y, value = value)) +
+  geom_parallel_sets(aes(fill = as.factor(Personal.Loan)),
+                     axis.width = 0.1,
+                     alpha = 0.66) + 
+  geom_parallel_sets_axes(axis.width = 0.15, fill = "lightgrey") + 
+  geom_parallel_sets_labels(angle = 0) +
+  coord_flip()
+```
+
+now get rid of data not needed
+```{r}
+bank_personal_loan3 <- bank_personal_loan3 |> 
+  select(-ZIP.Code, -Experience)
+```
+
+make personal loan a factor and make education too, maybe change family? - single, parnter, children?
+
+```{r}
+bank_personal_loan3$Personal.Loan <- factor(bank_personal_loan3$Personal.Loan, levels = c(0, 1), labels = c("No", "Yes"))
+
+bank_personal_loan3$Education = factor(bank_personal_loan3$Education, levels = c(1,2,3),
+                       labels = c("Undergrad", "Graduate", "Advanced"))
+```
+
+```{r}
+task <- TaskClassif$new(
+  id     = "personal_loan",
+  backend = bank_personal_loan3,
+  target  = "Personal.Loan",
+  positive = "Yes"       
+)
+
+task
+
+```
+
+```{r}
+learner <- lrn("classif.log_reg", predict_type = "prob") 
+
+cv5 <- rsmp("cv", folds = 5)
+cv5$instantiate(task)
+
+pipeline <- po("scale") %>>%
+            po("encode", method = "one-hot") %>>%
+            po("learner", learner)
+
+glrn <- as_learner(pipeline)
+
+rr <- resample(task, glrn, cv5, store_models = TRUE)
+
+rr$aggregate(msr("classif.auc"))
+```
+So roughly 88/1000 = ~9% acceptance rate — you do have a class imbalance problem as suspected. The model is missing 40 out of 88 loan acceptors (45% miss rate) which is quite high and worth addressing with class weights.
+
+```{r}
+learner <- lrn("classif.log_reg", predict_type = "prob") 
+pipeline <- po("scale") %>>%
+            po("encode", method = "one-hot") %>>%
+            po("learner", learner)
+glrn <- as_learner(pipeline)
+
+
+
+split <- partition(task, ratio = 0.8)
+glrn$train(task, row_ids = split$train)
+predictions <- glrn$predict(task, row_ids = split$test)
+predictions$score(msr("classif.auc"))
+predictions$confusion
+```
+
+cross validation better - no kind of equal/
+
+random forest - with test/train
+```{r}
+learner_rf1 <- lrn("classif.ranger",
+                  predict_type = "prob",
+                  importance    = "impurity")
+
+pipeline_rf1 <- po("scale") %>>%
+            po("encode", method = "one-hot") %>>%
+            po("learner", learner_rf1)
+
+glrn_rf1 <- as_learner(pipeline_rf1)
+
+split <- partition(task, ratio = 0.8)
+glrn_rf1$train(task, row_ids = split$train)
+predictions <- glrn_rf1$predict(task, row_ids = split$test)
+predictions$score(msr("classif.auc"))
+predictions$confusion
+```
+random forest with cross validation
+```{r}
+#install.packages("ranger") 
+library("ranger")
+
+learner_rf <- lrn("classif.ranger",
+                  predict_type = "prob",
+                  importance    = "impurity")
+
+pipeline_rf <- po("encode", method = "one-hot") %>>%
+               po("learner", learner_rf)
+
+glrn_rf <- as_learner(pipeline_rf)
+
+cv <- rsmp("cv", folds = 5)
+
+set.seed(42)
+rr_rf <- resample(task, glrn_rf, cv, store_models = TRUE)
+```
+
+```{r}
+rr_rf$aggregate(msrs(c(
+  "classif.auc",
+  "classif.acc",
+  "classif.precision",
+  "classif.recall"
+)))
+
+rr_rf$prediction()$confusion
+
+```
+
+tune hyper paramters? - using the random forest model. no early stopping
+
+```{r}
+
+learner <- lrn("classif.ranger",
+               predict_type = "prob")
+
+search_space <- ps(
+  mtry = p_int(1, 10),
+  min.node.size = p_int(1, 20),
+  sample.fraction = p_dbl(0.5, 1),
+  num.trees = p_int(200, 1000)
+)
+
+at <- auto_tuner(
+  learner = learner,
+  resampling = rsmp("cv", folds = 5),
+  measure = msr("classif.auc"),
+  search_space = search_space,
+  terminator = trm("evals", n_evals = 30),
+  tuner = tnr("random_search")
+)
+
+outer_cv <- rsmp("cv", folds = 5)
+
+# 3. Nested resampling
+rr <- resample(task, at, outer_cv, store_models = TRUE)
+
+rr$aggregate(msr("classif.auc"))
+```
+
+```{r}
+rr$aggregate(msrs(c(
+  "classif.precision",
+  "classif.recall",
+  "classif.fbeta"
+)))
+```
+
+When  model predicts a customer will accept the loan, it is correct 95.7% of the time.- precision
+correctly identify 89.3% of all customers who would accept the loan - recall
+Strong balance between precision and recall - F1 score
