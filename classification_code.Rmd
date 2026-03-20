@@ -44,6 +44,7 @@ There is no missing data, which is good to know. All data is said to be numerica
 Setting the seed for reproducible results
 ```{r}
 set.seed(54)
+options(mlr3.exec_random_seed = 54)
 ```
 
 seeing what percentage of people accept the loan, this gives an idea of how balanced the data is:
@@ -101,6 +102,7 @@ df$Education = factor(df$Education, levels = c(1,2,3),
 
 Create a task for the model, makes life easier as in one object.
 ```{r}
+# creating task object
 task <- TaskClassif$new(
   id     = "personal_loan",
   backend = df,
@@ -108,6 +110,7 @@ task <- TaskClassif$new(
   positive = "Yes"       
 )
 
+# viewing task
 task
 
 ```
@@ -116,13 +119,14 @@ Splitting the data into test and training, not enough data for validate. Explain
 ```{r}
 split <- partition(task, ratio = 0.8)
 
+# test and train objects
 train_task <- task$clone()$filter(split$train)
 test_task  <- task$clone()$filter(split$test)
 
 ```
 
 
-Defining the models that are going to be tested - logisitic regression and random forest:
+Defining the models that are going to be tested - logistic regression and random forest:
 ```{r}
 # logistic regression
 learner_lr <- lrn("classif.log_reg", predict_type = "prob")
@@ -155,62 +159,58 @@ glrn_fresh_rf <- glrn_rf$clone()
 glrn_final <- glrn_rf$clone()
 ```
 
-Just training on train data and testing on test data, to get a quick feel for the models and sanity check. Might be a bit unesseary.
+Just training on train data and testing on test data, to get a quick feel for the models and sanity check. Might be a bit unnecessary.
 ```{r}
+# training log regression + predicting
 glrn_lr$train(task, row_ids = split$train)
 pred_lr <- glrn_lr$predict(task, row_ids = split$test)
 
+# training random forest + prediciting
 glrn_rf$train(task, row_ids = split$train)
 pred_rf <- glrn_rf$predict(task, row_ids = split$test)
 
+# Finiding evaluation metrics
 pred_lr$score(msrs(c("classif.auc","classif.acc","classif.precision","classif.recall")))
 pred_rf$score(msrs(c("classif.auc","classif.acc","classif.precision","classif.recall")))
 ```
 
-Random forest seems better, but have to make sure. Cross validation to evaluate:
+Random forest seems better here, but above method is not enough to be convincing. Cross validationis better to evaluate:
 ```{r}
+# creating cross validation, 5 folds
 cv <- rsmp("cv", folds = 5)
 cv$instantiate(train_task)
 
+# cv on log regression + random forest
 rr_lr <- resample(train_task, glrn_fresh_lr, cv)
 rr_rf <- resample(train_task, glrn_fresh_rf, cv)
 
-# Logistic Regression
+# FInding metrics to compare
 rr_lr$aggregate(msrs(c("classif.auc","classif.acc","classif.precision","classif.recall")))
-# Random forest
 rr_rf$aggregate(msrs(c("classif.auc","classif.acc","classif.precision","classif.recall")))
 
-glrn_final$train(train_task)
-pred_test <- glrn_final$predict(test_task)
-
-pred_test$score(msrs(c(
-  "classif.auc",
-  "classif.acc",
-  "classif.precision",
-  "classif.recall"
-)))
 ```
 
+Here random forest if defiantly better. Can futher improve by tuning hyper parameters. Ones to tune are:
+Hyper parameters - mtry = number of features at each split
+                 - min.node.size = min observations in leaf node
+                 - sample.fraction = proportion of data used per tree
+                 - num.trees = number of trees in forest
+Also now use nested resampling as can tune hyper-parameters with this.
 
-
-tune hyper paramters? - using the random forest model. no early stopping
-cross validation good at telling model - best model is random forest - training a model that optimizes hyperparameters
-
-Hyper parameters - mtry = 
-                 - min.node.size = 
-                 - sample.fraction = 
-                 - num.trees = 
-
+This code takes a while to run.
 ```{r}
-
+# creating random forest learner
 learner <- lrn("classif.ranger",
                predict_type = "prob")
 
+# pipeline
 pipe <- po("encode", method = "one-hot") %>>%
         po("learner", learner)
 
+# making model
 model_pipe <- as_learner(pipe)
 
+# vlaues of hyperparameters to try - the ranges
 search_space <- ps(
   classif.ranger.mtry             = p_int(1, 10),
   classif.ranger.min.node.size    = p_int(1, 20),
@@ -218,7 +218,7 @@ search_space <- ps(
   classif.ranger.num.trees        = p_int(200, 1000)
 )
 
-# random search as quicker
+# random search for tuning hyper paramters - tuning object here
 at <- auto_tuner(
   learner = model_pipe,
   resampling = rsmp("cv", folds = 3),
@@ -228,11 +228,13 @@ at <- auto_tuner(
   tuner = tnr("random_search")
 )
 
+# outer loop
 outer_cv <- rsmp("cv", folds = 3)
 
-# 3. Nested resampling
+# Nested resampling of random forest
 rr <- resample(train_task, at, outer_cv, store_models = TRUE)
 
+# Evaluation metrics
 rr$aggregate(msrs(c(
   "classif.acc",
   "classif.auc",
@@ -243,44 +245,40 @@ rr$aggregate(msrs(c(
 ```
 
 
-When  model predicts a customer will accept the loan, it is correct 95.7% of the time.- precision
-correctly identify 89.3% of all customers who would accept the loan - recall
-Strong balance between precision and recall - F1 score
+now to find the standard deviations and the confusion matrix.
 ```{r}
-rr$aggregate(msrs(c(
-  "classif.acc",
-  "classif.auc",
-  "classif.precision",
-  "classif.recall",
-  "classif.fbeta"
-)))
-```
-```{r}
-fold_scores <- rr$score(msrs(c(
+
+# creating scores object/variable
+scores <- rr$score(msrs(c(
   "classif.auc",
   "classif.precision",
   "classif.recall",
   "classif.fbeta"
 )))
 
-fold_scores |>
+# finding the standatd deviatio 
+scores |>
   summarise(
     auc_sd   = sd(classif.auc),
     precision_sd   = sd(classif.precision),
     recall_sd   = sd(classif.recall)
   )
 
-
+# confusion matrix
 rr_pred <- rr$prediction()
 rr_pred$confusion
 
 ```
 
+Now the model is trained on the training data an evaluated finally on the unseen test data.
 ```{r}
 
+# Now training the final model
 at$train(train_task)
+# and evaluating on unseen data
 pred_test <- at$predict(test_task)
 
+# finding metrics
 pred_test$score(msrs(c(
   "classif.auc",
   "classif.acc",
@@ -292,28 +290,24 @@ pred_test$score(msrs(c(
 pred_test$confusion
 ```
 
+plotting the ROC an precision recall curve
 ```{r}
-
-
+# Plotting
 autoplot(pred_test, type = "roc")
 autoplot(pred_test, type = "prc")
 
-
-# ROC across all outer folds
-autoplot(rr, measure = msr("classif.auc"), type = "boxplot")
-
-# or see individual fold performance
-autoplot(rr, type = "roc")
 ```
 
+plotting the calibration plot.
 ```{r}
 
+# getting the data for the plot
 calibration_data <- data.frame(
   predicted = pred_test$prob[, "Yes"],
   actual = as.numeric(pred_test$truth == "Yes")
 )
 
-# bin predictions and compare to actual rate
+# getting bins, grouping
 calibration_data |>
   mutate(bin = cut(predicted, breaks = 10)) |>
   group_by(bin) |>
@@ -321,6 +315,7 @@ calibration_data |>
     mean_predicted = mean(predicted),
     actual_rate = mean(actual)
   ) |>
+  # plotting the real and predicitons
   ggplot(aes(x = mean_predicted, y = actual_rate)) +
   geom_point() +
    geom_line(colour = "blue") + 
