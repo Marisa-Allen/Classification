@@ -1,46 +1,77 @@
-Libraries needed for data analysis:
-
+Libraries needed for data analysis are included below. Please unhash and install packages that are not already installed, otherwise the code will not run.
 ```{r}
+#install.packages("tidyverse")
+#install.packages("ggplot2")
+#install.packages("ggforce")
+#install.packages("mlr3verse")
+#install.packages("GGally")
+#install.packages("mlr3viz")
+#install.packages("precrec")
+#install.packages("ranger")
+#install.packages("dplyr")
+
 library("tidyverse")
 library("ggplot2")
 library("ggforce")
 library("mlr3verse")
 library("GGally")
+library("mlr3viz")
+library("precrec")
+library("ranger")
+library("dplyr")
+```
+Cancelling anything but essential messages, CV and nested resampling print out a lot and was annoying.
+```{r}
+lgr::get_logger("mlr3")$set_threshold("warn")
+lgr::get_logger("bbotk")$set_threshold("warn")
 ```
 
 The Chosen data set was the Bank personal loan upsell data set. With the aim to predict whether a customer can be "upsold" to a personal banking loan.
 
-First skim the data to get an overview of the data:
+loading data from the link provided on learn:
 ```{r}
-skimr::skim(bank_personal_loan3)
-```
-There is no missing data, which is good to know. All data is said to be numerical, which is technically correct. However, the data of 0,1,0 etc. is categorical, not continuous numerical.
-
-Setting the seed for reprodiucable results
-```{r}
-set.seed(212)
+# creating a data frame
+df <- read.csv("https://www.maths.dur.ac.uk/users/hailiang.du/assignment_data/bank_personal_loan.csv")
 ```
 
-seeing what percentage of people accept the loan:
+First skim the data to get an overview of the data set:
 ```{r}
-tot_loans <- sum(bank_personal_loan3$Personal.Loan)
-len <- length(bank_personal_loan3$Personal.Loan)
+# Skimming
+skimr::skim(df)
+```
+There is no missing data, which is good to know. All data is said to be numerical, which is technically correct. However, the data of 0,1,0 etc. is categorical, not continuous numerical. This needs to be taken into consideration.
+
+Setting the seed for reproducible results
+```{r}
+set.seed(54)
+```
+
+seeing what percentage of people accept the loan, this gives an idea of how balanced the data is:
+```{r}
+# summing personal loans coloum (0 or 1)
+tot_loans <- sum(df$Personal.Loan)
+len <- length(df$Personal.Loan)
+# Dividing by lenght
 (tot_loans/len)*100
 ```
+Only 9.6% of people accept the loan. This is a very small amount so the data is indeed unbalanced. Therefore it has to be taken into consideration when evaluating the model, and which metrics to judge/ compare models with. Model accuracy could be interpreted wrong, AUC maybe better.
 
-looking at the realations between the continous variables with a pairs plot:
+looking at the relations between the continuous features with a pairs plot:
 ```{r}
-ggpairs(bank_personal_loan3 |> select(Age, Experience, Income, CCAvg, Mortgage))
+# Pairs plot
+ggpairs(df |> select(Age, Experience, Income, CCAvg, Mortgage))
 ```
-There is nearly linear correlation between Age and Experiance (0.9...), so do not need both. Disclude Experiance as there are negative values, so easier to get rid of this one as less preprocessing.
+There is a nearly linear correlation between Age and Experience (0.994), so do not need both. Exclude "Experience" as there are negative values which is not right. These would need to be changed so more processing, easier to get rid of this column instead of "Age".
 
-Now the discrete varibles
+Now to look at the relations between the discrete variables, so catagorical. Inspiration taken from the workshop.
 ```{r}
-bank_discrete <- bank_personal_loan3 |>
+# Creating variable for ggplot
+bank_discrete <- df |>
   select(Personal.Loan, Education, Securities.Account, CD.Account, Online, CreditCard, Family) |>
   group_by(Personal.Loan, Education,  Securities.Account, CD.Account, Online, CreditCard, Family) |>
   summarize(value = n())
 
+# Plotting
 ggplot(bank_discrete |> gather_set_data(x = c(1, 1:7)),
        aes(x = x, id = id, split = y, value = value)) +
   geom_parallel_sets(aes(fill = as.factor(Personal.Loan)),
@@ -50,26 +81,29 @@ ggplot(bank_discrete |> gather_set_data(x = c(1, 1:7)),
   geom_parallel_sets_labels(angle = 0) +
   coord_flip()
 ```
+Hard to see relations as a small fraction accept the personal loan. But between securities account, Personal loan and Online, there seems to be a group that follows this.
 
-now get rid of data not needed
+now get rid of data not needed (ZIP.Code as not in a format that is useful, does not say much):
 ```{r}
-bank_personal_loan3 <- bank_personal_loan3 |> 
+# deleting colums not needed
+df <- df |> 
   select(-ZIP.Code, -Experience)
 ```
 
-make personal loan a factor and make education too, maybe change family? - single, parnter, children?
-
+Make personal loan a factor and make education too. No need for the rest as the models (log regres and rand forest) are able to cope with this.
 ```{r}
-bank_personal_loan3$Personal.Loan <- factor(bank_personal_loan3$Personal.Loan, levels = c(0, 1), labels = c("No", "Yes"))
+# Making factors
+df$Personal.Loan <- factor(df$Personal.Loan, levels = c(0, 1), labels = c("No", "Yes"))
 
-bank_personal_loan3$Education = factor(bank_personal_loan3$Education, levels = c(1,2,3),
+df$Education = factor(df$Education, levels = c(1,2,3),
                        labels = c("Undergrad", "Graduate", "Advanced"))
 ```
 
+Create a task for the model, makes life easier as in one object.
 ```{r}
 task <- TaskClassif$new(
   id     = "personal_loan",
-  backend = bank_personal_loan3,
+  backend = df,
   target  = "Personal.Loan",
   positive = "Yes"       
 )
@@ -78,131 +112,221 @@ task
 
 ```
 
+Splitting the data into test and training, not enough data for validate. Explained in report.
 ```{r}
-learner <- lrn("classif.log_reg", predict_type = "prob") 
-
-cv5 <- rsmp("cv", folds = 5)
-cv5$instantiate(task)
-
-pipeline <- po("scale") %>>%
-            po("encode", method = "one-hot") %>>%
-            po("learner", learner)
-
-glrn <- as_learner(pipeline)
-
-rr <- resample(task, glrn, cv5, store_models = TRUE)
-
-rr$aggregate(msr("classif.auc"))
-```
-So roughly 88/1000 = ~9% acceptance rate — you do have a class imbalance problem as suspected. The model is missing 40 out of 88 loan acceptors (45% miss rate) which is quite high and worth addressing with class weights.
-
-```{r}
-learner <- lrn("classif.log_reg", predict_type = "prob") 
-pipeline <- po("scale") %>>%
-            po("encode", method = "one-hot") %>>%
-            po("learner", learner)
-glrn <- as_learner(pipeline)
-
-
-
 split <- partition(task, ratio = 0.8)
-glrn$train(task, row_ids = split$train)
-predictions <- glrn$predict(task, row_ids = split$test)
-predictions$score(msr("classif.auc"))
-predictions$confusion
+
+train_task <- task$clone()$filter(split$train)
+test_task  <- task$clone()$filter(split$test)
+
 ```
 
-cross validation better - no kind of equal/
 
-random forest - with test/train
+Defining the models that are going to be tested - logisitic regression and random forest:
 ```{r}
-learner_rf1 <- lrn("classif.ranger",
-                  predict_type = "prob",
-                  importance    = "impurity")
+# logistic regression
+learner_lr <- lrn("classif.log_reg", predict_type = "prob")
 
-pipeline_rf1 <- po("scale") %>>%
-            po("encode", method = "one-hot") %>>%
-            po("learner", learner_rf1)
+# pre processing pipeline
+pipeline_lr <- po("scale") %>>%
+               po("encode", method = "one-hot") %>>%
+               po("learner", learner_lr)
 
-glrn_rf1 <- as_learner(pipeline_rf1)
+# creating model
+glrn_lr <- as_learner(pipeline_lr)
 
-split <- partition(task, ratio = 0.8)
-glrn_rf1$train(task, row_ids = split$train)
-predictions <- glrn_rf1$predict(task, row_ids = split$test)
-predictions$score(msr("classif.auc"))
-predictions$confusion
-```
-random forest with cross validation
-```{r}
-#install.packages("ranger") 
-library("ranger")
+# -------------------------------------------------------------------
+# random forest
+learner_rf <- lrn("classif.ranger", predict_type = "prob")
 
-learner_rf <- lrn("classif.ranger",
-                  predict_type = "prob",
-                  importance    = "impurity")
-
+# prepossessing pipeline
 pipeline_rf <- po("encode", method = "one-hot") %>>%
                po("learner", learner_rf)
 
+# model
 glrn_rf <- as_learner(pipeline_rf)
 
-cv <- rsmp("cv", folds = 5)
 
-set.seed(42)
-rr_rf <- resample(task, glrn_rf, cv, store_models = TRUE)
+# copies of the model
+glrn_fresh_lr <- glrn_lr$clone()
+glrn_fresh_rf <- glrn_rf$clone()
+
+# final model to use
+glrn_final <- glrn_rf$clone()
 ```
 
+Just training on train data and testing on test data, to get a quick feel for the models and sanity check. Might be a bit unesseary.
 ```{r}
-rr_rf$aggregate(msrs(c(
+glrn_lr$train(task, row_ids = split$train)
+pred_lr <- glrn_lr$predict(task, row_ids = split$test)
+
+glrn_rf$train(task, row_ids = split$train)
+pred_rf <- glrn_rf$predict(task, row_ids = split$test)
+
+pred_lr$score(msrs(c("classif.auc","classif.acc","classif.precision","classif.recall")))
+pred_rf$score(msrs(c("classif.auc","classif.acc","classif.precision","classif.recall")))
+```
+
+Random forest seems better, but have to make sure. Cross validation to evaluate:
+```{r}
+cv <- rsmp("cv", folds = 5)
+cv$instantiate(train_task)
+
+rr_lr <- resample(train_task, glrn_fresh_lr, cv)
+rr_rf <- resample(train_task, glrn_fresh_rf, cv)
+
+# Logistic Regression
+rr_lr$aggregate(msrs(c("classif.auc","classif.acc","classif.precision","classif.recall")))
+# Random forest
+rr_rf$aggregate(msrs(c("classif.auc","classif.acc","classif.precision","classif.recall")))
+
+glrn_final$train(train_task)
+pred_test <- glrn_final$predict(test_task)
+
+pred_test$score(msrs(c(
   "classif.auc",
   "classif.acc",
   "classif.precision",
   "classif.recall"
 )))
-
-rr_rf$prediction()$confusion
-
 ```
 
+
+
 tune hyper paramters? - using the random forest model. no early stopping
+cross validation good at telling model - best model is random forest - training a model that optimizes hyperparameters
+
+Hyper parameters - mtry = 
+                 - min.node.size = 
+                 - sample.fraction = 
+                 - num.trees = 
 
 ```{r}
 
 learner <- lrn("classif.ranger",
                predict_type = "prob")
 
+pipe <- po("encode", method = "one-hot") %>>%
+        po("learner", learner)
+
+model_pipe <- as_learner(pipe)
+
 search_space <- ps(
-  mtry = p_int(1, 10),
-  min.node.size = p_int(1, 20),
-  sample.fraction = p_dbl(0.5, 1),
-  num.trees = p_int(200, 1000)
+  classif.ranger.mtry             = p_int(1, 10),
+  classif.ranger.min.node.size    = p_int(1, 20),
+  classif.ranger.sample.fraction  = p_dbl(0.5, 1),
+  classif.ranger.num.trees        = p_int(200, 1000)
 )
 
+# random search as quicker
 at <- auto_tuner(
-  learner = learner,
-  resampling = rsmp("cv", folds = 5),
+  learner = model_pipe,
+  resampling = rsmp("cv", folds = 3),
   measure = msr("classif.auc"),
   search_space = search_space,
-  terminator = trm("evals", n_evals = 30),
+  terminator = trm("evals", n_evals = 20),
   tuner = tnr("random_search")
 )
 
-outer_cv <- rsmp("cv", folds = 5)
+outer_cv <- rsmp("cv", folds = 3)
 
 # 3. Nested resampling
-rr <- resample(task, at, outer_cv, store_models = TRUE)
+rr <- resample(train_task, at, outer_cv, store_models = TRUE)
 
-rr$aggregate(msr("classif.auc"))
-```
-
-```{r}
 rr$aggregate(msrs(c(
+  "classif.acc",
+  "classif.auc",
   "classif.precision",
   "classif.recall",
   "classif.fbeta"
 )))
 ```
 
+
 When  model predicts a customer will accept the loan, it is correct 95.7% of the time.- precision
 correctly identify 89.3% of all customers who would accept the loan - recall
 Strong balance between precision and recall - F1 score
+```{r}
+rr$aggregate(msrs(c(
+  "classif.acc",
+  "classif.auc",
+  "classif.precision",
+  "classif.recall",
+  "classif.fbeta"
+)))
+```
+```{r}
+fold_scores <- rr$score(msrs(c(
+  "classif.auc",
+  "classif.precision",
+  "classif.recall",
+  "classif.fbeta"
+)))
+
+fold_scores |>
+  summarise(
+    auc_sd   = sd(classif.auc),
+    precision_sd   = sd(classif.precision),
+    recall_sd   = sd(classif.recall)
+  )
+
+
+rr_pred <- rr$prediction()
+rr_pred$confusion
+
+```
+
+```{r}
+
+at$train(train_task)
+pred_test <- at$predict(test_task)
+
+pred_test$score(msrs(c(
+  "classif.auc",
+  "classif.acc",
+  "classif.precision",
+  "classif.recall",
+  "classif.fbeta"
+)))
+
+pred_test$confusion
+```
+
+```{r}
+
+
+autoplot(pred_test, type = "roc")
+autoplot(pred_test, type = "prc")
+
+
+# ROC across all outer folds
+autoplot(rr, measure = msr("classif.auc"), type = "boxplot")
+
+# or see individual fold performance
+autoplot(rr, type = "roc")
+```
+
+```{r}
+
+calibration_data <- data.frame(
+  predicted = pred_test$prob[, "Yes"],
+  actual = as.numeric(pred_test$truth == "Yes")
+)
+
+# bin predictions and compare to actual rate
+calibration_data |>
+  mutate(bin = cut(predicted, breaks = 10)) |>
+  group_by(bin) |>
+  summarise(
+    mean_predicted = mean(predicted),
+    actual_rate = mean(actual)
+  ) |>
+  ggplot(aes(x = mean_predicted, y = actual_rate)) +
+  geom_point() +
+   geom_line(colour = "blue") + 
+  geom_abline(linetype = "dashed") +  # perfect calibration line
+  labs(title = "Calibration Plot",
+       x = "Mean Probability in Each Bin",
+       y = "Actual Probabilty of Each Bin")
+```
+
