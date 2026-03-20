@@ -1,8 +1,8 @@
 ---
 author: "000872211"
 output:
-  html_document: default
   pdf_document: default
+  html_document: default
 ---
 
 Libraries needed for data analysis are included below. Please unhash and install packages that are not already installed, otherwise the code will not run.
@@ -146,8 +146,8 @@ Splitting the data into test and training, not enough data for validate. Explain
 split <- partition(task, ratio = 0.8)
 
 # test and train objects
-train_task <- task$clone()$filter(split$train)
-test_task  <- task$clone()$filter(split$test)
+train_task_obj <- task$clone()$filter(split$train)
+test_task_obj <- task$clone()$filter(split$test)
 
 ```
 
@@ -158,23 +158,23 @@ Defining the models that are going to be tested - logistic regression and random
 learner_lr <- lrn("classif.log_reg", predict_type = "prob")
 
 # pre processing pipeline
-pipeline_lr <- po("scale") %>>%
-               po("encode", method = "one-hot") %>>%
-               po("learner", learner_lr)
+pipe_lr <- po("scale") %>>%
+  po("encode", method = "one-hot") %>>%
+  po("learner", learner_lr)
 
 # creating model
-glrn_lr <- as_learner(pipeline_lr)
+glrn_lr <- as_learner(pipe_lr)
 
 # -------------------------------------------------------------------
 # random forest
 learner_rf <- lrn("classif.ranger", predict_type = "prob")
 
 # prepossessing pipeline
-pipeline_rf <- po("encode", method = "one-hot") %>>%
-               po("learner", learner_rf)
+pipe_rf <- po("encode", method = "one-hot") %>>%
+  po("learner", learner_rf)
 
 # model
-glrn_rf <- as_learner(pipeline_rf)
+glrn_rf <- as_learner(pipe_rf)
 
 
 # copies of the model
@@ -196,7 +196,7 @@ pred_lr <- glrn_lr$predict(task, row_ids = split$test)
 glrn_rf$train(task, row_ids = split$train)
 pred_rf <- glrn_rf$predict(task, row_ids = split$test)
 
-# Finiding evaluation metrics
+# Finding evaluation metrics
 pred_lr$score(msrs(c("classif.auc","classif.acc","classif.precision","classif.recall")))
 pred_rf$score(msrs(c("classif.auc","classif.acc","classif.precision","classif.recall")))
 ```
@@ -206,11 +206,11 @@ Random forest seems better here, but above method is not enough to be convincing
 ```{r}
 # creating cross validation, 5 folds
 cv <- rsmp("cv", folds = 5)
-cv$instantiate(train_task)
+cv$instantiate(train_task_obj)
 
 # cv on log regression + random forest
-rr_lr <- resample(train_task, glrn_fresh_lr, cv)
-rr_rf <- resample(train_task, glrn_fresh_rf, cv)
+rr_lr <- resample(train_task_obj, glrn_fresh_lr, cv)
+rr_rf <- resample(train_task_obj, glrn_fresh_rf, cv)
 
 # FInding metrics to compare
 rr_lr$aggregate(msrs(c("classif.auc","classif.acc","classif.precision","classif.recall")))
@@ -239,7 +239,7 @@ search_space <- ps(
   classif.ranger.mtry             = p_int(1, 10),
   classif.ranger.min.node.size    = p_int(1, 20),
   classif.ranger.sample.fraction  = p_dbl(0.5, 1),
-  classif.ranger.num.trees        = p_int(200, 1000)
+  classif.ranger.num.trees        = p_int(200, 900)
 )
 
 # random search for tuning hyper paramters - tuning object here
@@ -253,10 +253,10 @@ at <- auto_tuner(
 )
 
 # outer loop
-outer_cv <- rsmp("cv", folds = 3)
+out_cv <- rsmp("cv", folds = 3)
 
 # Nested resampling of random forest
-rr <- resample(train_task, at, outer_cv, store_models = TRUE)
+rr <- resample(train_task_obj, at, out_cv, store_models = TRUE)
 
 # Evaluation metrics
 rr$aggregate(msrs(c(
@@ -283,9 +283,9 @@ scores <- rr$score(msrs(c(
 # finding the standatd deviatio 
 scores |>
   summarise(
-    auc_sd   = sd(classif.auc),
-    precision_sd   = sd(classif.precision),
-    recall_sd   = sd(classif.recall)
+    auc_std   = sd(classif.auc),
+    precision_std   = sd(classif.precision),
+    recall_std   = sd(classif.recall)
   )
 
 # confusion matrix
@@ -299,9 +299,9 @@ Now the model is trained on the training data an evaluated finally on the unseen
 ```{r}
 
 # Now training the final model
-at$train(train_task)
+at$train(train_task_obj)
 # and evaluating on unseen data
-pred_test <- at$predict(test_task)
+pred_test <- at$predict(test_task_obj)
 
 # finding metrics
 pred_test$score(msrs(c(
