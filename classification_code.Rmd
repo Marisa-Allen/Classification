@@ -1,4 +1,12 @@
+---
+author: "000872211"
+output:
+  html_document: default
+  pdf_document: default
+---
+
 Libraries needed for data analysis are included below. Please unhash and install packages that are not already installed, otherwise the code will not run.
+
 ```{r}
 #install.packages("tidyverse")
 #install.packages("ggplot2")
@@ -9,6 +17,7 @@ Libraries needed for data analysis are included below. Please unhash and install
 #install.packages("precrec")
 #install.packages("ranger")
 #install.packages("dplyr")
+#install.packages("tinytex")
 
 library("tidyverse")
 library("ggplot2")
@@ -19,8 +28,11 @@ library("mlr3viz")
 library("precrec")
 library("ranger")
 library("dplyr")
+library("tinytex")
 ```
+
 Cancelling anything but essential messages, CV and nested resampling print out a lot and was annoying.
+
 ```{r}
 lgr::get_logger("mlr3")$set_threshold("warn")
 lgr::get_logger("bbotk")$set_threshold("warn")
@@ -29,25 +41,30 @@ lgr::get_logger("bbotk")$set_threshold("warn")
 The Chosen data set was the Bank personal loan upsell data set. With the aim to predict whether a customer can be "upsold" to a personal banking loan.
 
 loading data from the link provided on learn:
+
 ```{r}
 # creating a data frame
-df <- read.csv("https://www.maths.dur.ac.uk/users/hailiang.du/assignment_data/bank_personal_loan.csv")
+df <- readr::read_csv("https://www.maths.dur.ac.uk/users/hailiang.du/assignment_data/bank_personal_loan.csv")
 ```
 
 First skim the data to get an overview of the data set:
+
 ```{r}
 # Skimming
 skimr::skim(df)
 ```
+
 There is no missing data, which is good to know. All data is said to be numerical, which is technically correct. However, the data of 0,1,0 etc. is categorical, not continuous numerical. This needs to be taken into consideration.
 
 Setting the seed for reproducible results
+
 ```{r}
 set.seed(54)
 options(mlr3.exec_random_seed = 54)
 ```
 
 seeing what percentage of people accept the loan, this gives an idea of how balanced the data is:
+
 ```{r}
 # summing personal loans coloum (0 or 1)
 tot_loans <- sum(df$Personal.Loan)
@@ -55,20 +72,24 @@ len <- length(df$Personal.Loan)
 # Dividing by lenght
 (tot_loans/len)*100
 ```
+
 Only 9.6% of people accept the loan. This is a very small amount so the data is indeed unbalanced. Therefore it has to be taken into consideration when evaluating the model, and which metrics to judge/ compare models with. Model accuracy could be interpreted wrong, AUC maybe better.
 
 looking at the relations between the continuous features with a pairs plot:
+
 ```{r}
 # Pairs plot
-ggpairs(df |> select(Age, Experience, Income, CCAvg, Mortgage))
+ggpairs(df |> dplyr::select(Age, Experience, Income, CCAvg, Mortgage))
 ```
+
 There is a nearly linear correlation between Age and Experience (0.994), so do not need both. Exclude "Experience" as there are negative values which is not right. These would need to be changed so more processing, easier to get rid of this column instead of "Age".
 
 Now to look at the relations between the discrete variables, so catagorical. Inspiration taken from the workshop.
+
 ```{r}
 # Creating variable for ggplot
 bank_discrete <- df |>
-  select(Personal.Loan, Education, Securities.Account, CD.Account, Online, CreditCard, Family) |>
+  dplyr::select(Personal.Loan, Education, Securities.Account, CD.Account, Online, CreditCard, Family) |>
   group_by(Personal.Loan, Education,  Securities.Account, CD.Account, Online, CreditCard, Family) |>
   summarize(value = n())
 
@@ -82,16 +103,19 @@ ggplot(bank_discrete |> gather_set_data(x = c(1, 1:7)),
   geom_parallel_sets_labels(angle = 0) +
   coord_flip()
 ```
+
 Hard to see relations as a small fraction accept the personal loan. But between securities account, Personal loan and Online, there seems to be a group that follows this.
 
 now get rid of data not needed (ZIP.Code as not in a format that is useful, does not say much):
+
 ```{r}
 # deleting colums not needed
 df <- df |> 
-  select(-ZIP.Code, -Experience)
+  dplyr::select(-ZIP.Code, -Experience)
 ```
 
 Make personal loan a factor and make education too. No need for the rest as the models (log regres and rand forest) are able to cope with this.
+
 ```{r}
 # Making factors
 df$Personal.Loan <- factor(df$Personal.Loan, levels = c(0, 1), labels = c("No", "Yes"))
@@ -101,6 +125,7 @@ df$Education = factor(df$Education, levels = c(1,2,3),
 ```
 
 Create a task for the model, makes life easier as in one object.
+
 ```{r}
 # creating task object
 task <- TaskClassif$new(
@@ -116,6 +141,7 @@ task
 ```
 
 Splitting the data into test and training, not enough data for validate. Explained in report.
+
 ```{r}
 split <- partition(task, ratio = 0.8)
 
@@ -125,8 +151,8 @@ test_task  <- task$clone()$filter(split$test)
 
 ```
 
-
 Defining the models that are going to be tested - logistic regression and random forest:
+
 ```{r}
 # logistic regression
 learner_lr <- lrn("classif.log_reg", predict_type = "prob")
@@ -160,6 +186,7 @@ glrn_final <- glrn_rf$clone()
 ```
 
 Just training on train data and testing on test data, to get a quick feel for the models and sanity check. Might be a bit unnecessary.
+
 ```{r}
 # training log regression + predicting
 glrn_lr$train(task, row_ids = split$train)
@@ -175,6 +202,7 @@ pred_rf$score(msrs(c("classif.auc","classif.acc","classif.precision","classif.re
 ```
 
 Random forest seems better here, but above method is not enough to be convincing. Cross validationis better to evaluate:
+
 ```{r}
 # creating cross validation, 5 folds
 cv <- rsmp("cv", folds = 5)
@@ -190,14 +218,10 @@ rr_rf$aggregate(msrs(c("classif.auc","classif.acc","classif.precision","classif.
 
 ```
 
-Here random forest if defiantly better. Can futher improve by tuning hyper parameters. Ones to tune are:
-Hyper parameters - mtry = number of features at each split
-                 - min.node.size = min observations in leaf node
-                 - sample.fraction = proportion of data used per tree
-                 - num.trees = number of trees in forest
-Also now use nested resampling as can tune hyper-parameters with this.
+Here random forest if defiantly better. Can futher improve by tuning hyper parameters. Ones to tune are: Hyper parameters - mtry = number of features at each split - min.node.size = min observations in leaf node - sample.fraction = proportion of data used per tree - num.trees = number of trees in forest Also now use nested resampling as can tune hyper-parameters with this.
 
 This code takes a while to run.
+
 ```{r}
 # creating random forest learner
 learner <- lrn("classif.ranger",
@@ -244,8 +268,8 @@ rr$aggregate(msrs(c(
 )))
 ```
 
-
 now to find the standard deviations and the confusion matrix.
+
 ```{r}
 
 # creating scores object/variable
@@ -271,6 +295,7 @@ rr_pred$confusion
 ```
 
 Now the model is trained on the training data an evaluated finally on the unseen test data.
+
 ```{r}
 
 # Now training the final model
@@ -291,6 +316,7 @@ pred_test$confusion
 ```
 
 plotting the ROC an precision recall curve
+
 ```{r}
 # Plotting
 autoplot(pred_test, type = "roc")
@@ -299,6 +325,7 @@ autoplot(pred_test, type = "prc")
 ```
 
 plotting the calibration plot.
+
 ```{r}
 
 # getting the data for the plot
@@ -324,4 +351,3 @@ calibration_data |>
        x = "Mean Probability in Each Bin",
        y = "Actual Probabilty of Each Bin")
 ```
-
